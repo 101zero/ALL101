@@ -109,8 +109,11 @@ TMPFILE="$(mktemp /tmp/nuclei_out_XXXXXX)"
 # Use tee to capture output while piping
 set +e
 nuclei -l "$TARGETS_PATH" -t "$TEMPLATES_PATH" -s high,critical -as -silent 2>&1 | tee "$TMPFILE" | notify -pc "$PROVIDER_PATH"
-PIPE_EXIT="${PIPESTATUS[0]}"  # nuclei exit code
-NOTIFY_EXIT="${PIPESTATUS[2]}"  # notify exit code (tee is [1], notify is [2])
+# Save PIPESTATUS immediately before any other command
+PIPE_STATUS=("${PIPESTATUS[@]}")
+PIPE_EXIT="${PIPE_STATUS[0]:-1}"  # nuclei exit code (default to 1 if not set)
+TEE_EXIT="${PIPE_STATUS[1]:-0}"   # tee exit code (default to 0 if not set)
+NOTIFY_EXIT="${PIPE_STATUS[2]:-1}"  # notify exit code (default to 1 if not set)
 set -e
 
 # Check results
