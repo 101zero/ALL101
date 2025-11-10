@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-
 set -euo pipefail
 
 TARGETS_PATH="${TARGETS_PATH:-/data/5subdomains.txt}"
@@ -11,18 +10,7 @@ log(){ echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] $*"; }
 log "START - nuclei-notify (pipe mode)"
 log "TARGETS=$TARGETS_PATH PROVIDER=$PROVIDER_PATH TEMPLATES=$TEMPLATES_PATH"
 
-# Check binaries exist
-if ! command -v nuclei &> /dev/null; then
-  log "ERROR: nuclei binary not found in PATH"
-  exit 1
-fi
-
-if ! command -v notify &> /dev/null; then
-  log "ERROR: notify binary not found in PATH"
-  exit 1
-fi
-
-# Checks
+# checks
 if [ ! -f "$PROVIDER_PATH" ]; then
   log "ERROR provider file missing at $PROVIDER_PATH"
   exit 2
@@ -33,120 +21,98 @@ if [ ! -f "$TARGETS_PATH" ]; then
   exit 2
 fi
 
-if [ ! -s "$TARGETS_PATH" ]; then
-  log "ERROR targets file is empty at $TARGETS_PATH"
-  exit 2
-fi
-
-# Ensure templates exist; download official master if missing
+# ensure templates exist; download official master if missing
 if [ ! -d "$TEMPLATES_PATH" ] || [ -z "$(ls -A "$TEMPLATES_PATH" 2>/dev/null || true)" ]; then
   log "nuclei-templates not present, downloading..."
-  
-  TEMP_DIR=$(mktemp -d)
-  TMPZIP="$TEMP_DIR/nuclei-templates.zip"
-  
-  # Try to download from main branch (latest)
-  if ! wget -q -O "$TMPZIP" "https://github.com/projectdiscovery/nuclei-templates/archive/refs/heads/main.zip"; then
-    log "WARN: main branch download failed, trying v10.3.1 tag..."
-    if ! wget -q -O "$TMPZIP" "https://github.com/projectdiscovery/nuclei-templates/archive/refs/tags/v10.3.1.zip"; then
-      log "ERROR: templates download failed completely"
-      rm -rf "$TEMP_DIR"
-      exit 1
+  TMPZIP="$(mktemp -u /tmp/nuclei-templates_XXXX.zip)"
+  TMPZIP="/tmp/nuclei-templates.zip"
+  # keep the link exactly as requested
+  wget -q -O "$TMPZIP" "https://github.com/projectdiscovery/nuclei-templates/archive/refs/tags/v10.3.1.zip" || log "WARN: templates download failed"
+  mkdir -p "$TEMPLATES_PATH"
+  # unzip into /tmp
+  unzip -o "$TMPZIP" -d /tmp >/dev/null 2>&1 || true
+
+  # ==== find the extracted directory dynamically ====
+  # There are two common cases:
+  # 1) zip contains a single top-level folder (e.g. /tmp/nuclei-templates-10.3.1)
+  # 2) zip contains many files at top level (rare). We handle case 1 primarily.
+  EXTRACTED_DIR=""
+  # prefer directories that start with 'nuclei-templates'
+  for d in /tmp/nuclei-templates*; do
+    [ -e "$d" ] || continue
+    # skip the zip file itself
+    if [ -f "$d" ]; then
+      continue
+    fi
+    # ensure it's a directory and not the destination path
+    if [ -d "$d" ] && [ "$(basename "$d")" != "$(basename "$TEMPLATES_PATH")" ]; then
+      EXTRACTED_DIR="$d"
+      break
+    fi
+  done
+
+  if [ -n "$EXTRACTED_DIR" ]; then
+    log "moving extracted templates from $EXTRACTED_DIR -> $TEMPLATES_PATH"
+    # move contents (preserve if exists, but allow overwrite)
+    mkdir -p "$TEMPLATES_PATH"
+    # use mv of contents; if target already has files, mv will merge/overwrite
+    mv "$EXTRACTED_DIR"/* "$TEMPLATES_PATH"/ 2>/dev/null || true
+    # if there are hidden files in extracted dir, move them too
+    shopt_saved=""
+    if command -v shopt >/dev/null 2>&1; then
+      # enable dotglob temporarily (bash)
+      shopt -s dotglob 2>/dev/null || true
+      mv "$EXTRACTED_DIR"/.* "$TEMPLATES_PATH"/ 2>/dev/null || true
+      # restore not strictly necessary in ephemeral container
+    fi
+    # cleanup extracted dir if empty
+    rmdir --ignore-fail-on-non-empty "$EXTRACTED_DIR" 2>/dev/null || true
+  else
+    # fallback: maybe unzip put files directly into /tmp; try to move nuclei-templates* files
+    log "WARN: could not find an extracted directory named /tmp/nuclei-templates*; trying to detect files"
+    # if unzip produced a directory named exactly 'nuclei-templates', move it
+    if [ -d /tmp/nuclei-templates ]; then
+      log "Found /tmp/nuclei-templates, moving to $TEMPLATES_PATH"
+      mv /tmp/nuclei-templates/* "$TEMPLATES_PATH"/ 2>/dev/null || true
+    else
+      # as last resort, list zip contents and try to extract names
+      FIRST_DIR="$(unzip -Z1 "$TMPZIP" 2>/dev/null | head -n1 | cut -d'/' -f1 || true)"
+      if [ -n "$FIRST_DIR" ] && [ -d "/tmp/$FIRST_DIR" ]; then
+        log "Detected first-level folder /tmp/$FIRST_DIR, moving contents"
+        mv "/tmp/$FIRST_DIR"/* "$TEMPLATES_PATH"/ 2>/dev/null || true
+      else
+        log "WARN: unable to automatically place templates - $TEMPLATES_PATH may still be empty"
+      fi
     fi
   fi
-  
-  mkdir -p "$TEMPLATES_PATH"
-  
-  if ! unzip -q -o "$TMPZIP" -d "$TEMP_DIR"; then
-    log "ERROR: failed to extract templates"
-    rm -rf "$TEMP_DIR"
-    exit 1
-  fi
-  
-  # Handle different archive structures
-  if [ -d "$TEMP_DIR/nuclei-templates-main" ]; then
-    mv "$TEMP_DIR/nuclei-templates-main"/* "$TEMPLATES_PATH"/ || {
-      log "ERROR: failed to move templates-main"
-      rm -rf "$TEMP_DIR"
-      exit 1
-    }
-  elif [ -d "$TEMP_DIR/nuclei-templates-10.3.1" ]; then
-    mv "$TEMP_DIR/nuclei-templates-10.3.1"/* "$TEMPLATES_PATH"/ || {
-      log "ERROR: failed to move templates-10.3.1"
-      rm -rf "$TEMP_DIR"
-      exit 1
-    }
-  elif [ -d "$TEMP_DIR/nuclei-templates-master" ]; then
-    mv "$TEMP_DIR/nuclei-templates-master"/* "$TEMPLATES_PATH"/ || {
-      log "ERROR: failed to move templates-master"
-      rm -rf "$TEMP_DIR"
-      exit 1
-    }
-  else
-    log "ERROR: unexpected templates archive structure in $TEMP_DIR"
-    ls -la "$TEMP_DIR"
-    rm -rf "$TEMP_DIR"
-    exit 1
-  fi
-  
-  rm -rf "$TEMP_DIR"
-  log "Templates downloaded successfully"
-fi
 
-# Verify templates directory is not empty
-if [ -z "$(ls -A "$TEMPLATES_PATH" 2>/dev/null || true)" ]; then
-  log "ERROR: templates directory is empty after setup"
-  exit 1
+  rm -f "$TMPZIP" 2>/dev/null || true
 fi
 
 # --- PRIMARY: exact command requested (pipe, no JSON flag) ---
-log "Running: nuclei -l $TARGETS_PATH -t $TEMPLATES_PATH -s high,critical -as -silent | notify -pc $PROVIDER_PATH"
-
-# Create temp file for fallback
-TMPFILE="$(mktemp /tmp/nuclei_out_XXXXXX)"
-
-# Try direct pipe first
-# Use tee to capture output while piping
+log "Running: nuclei -l $TARGETS_PATH -t $TEMPLATES_PATH -s high,critical -silent | notify -pc $PROVIDER_PATH"
 set +e
-nuclei -l "$TARGETS_PATH" -t "$TEMPLATES_PATH" -s high,critical -as -silent 2>&1 | tee "$TMPFILE" | notify -pc "$PROVIDER_PATH"
-PIPE_EXIT="${PIPESTATUS[0]}"  # nuclei exit code
-NOTIFY_EXIT="${PIPESTATUS[2]}"  # notify exit code
+nuclei -l "$TARGETS_PATH" -t "$TEMPLATES_PATH" -s high,critical -silent | notify -pc "$PROVIDER_PATH"
+PIPE_EXIT="$?"
 set -e
 
-# Check results
-if [ "$PIPE_EXIT" -eq 0 ] && [ "$NOTIFY_EXIT" -eq 0 ]; then
-  if [ -s "$TMPFILE" ]; then
-    log "PIPE OK: nuclei output piped to notify successfully"
-    log "Output preview (first 5 lines):"
-    head -n 5 "$TMPFILE" || true
-  else
-    log "INFO: No findings detected (empty output)"
-  fi
-  rm -f "$TMPFILE"
+if [ "$PIPE_EXIT" -eq 0 ]; then
+  log "PIPE OK: nuclei output piped to notify successfully"
   exit 0
-elif [ "$PIPE_EXIT" -ne 0 ]; then
-  log "WARN: nuclei failed with exit code $PIPE_EXIT"
-elif [ "$NOTIFY_EXIT" -ne 0 ]; then
-  log "WARN: notify failed with exit code $NOTIFY_EXIT"
 fi
 
-# --- FALLBACK (only if pipe failed) ---
-log "PIPE failed. Trying fallback: capture nuclei output and retry notify with -input"
+# --- FALLBACK (only if direct pipe fails) ---
+log "PIPE FAILED (exit $PIPE_EXIT). Falling back: capture nuclei output to temp file and retry notify with -input"
 
-# If TMPFILE is empty or doesn't exist, run nuclei again
-if [ ! -s "$TMPFILE" ]; then
-  set +e
-  nuclei -l "$TARGETS_PATH" -t "$TEMPLATES_PATH" -s high,critical -silent -o "$TMPFILE" 2>&1
-  NUC_EXIT=$?
-  set -e
-  
-  if [ "$NUC_EXIT" -ne 0 ]; then
-    log "WARN: fallback nuclei exited with code $NUC_EXIT"
-  fi
-fi
+TMPFILE="$(mktemp /tmp/nuclei_out_XXXX)"
+# produce plain text output (no -json): write to file then call notify -input
+set +e
+nuclei -l "$TARGETS_PATH" -t "$TEMPLATES_PATH" -s high,critical -silent -o "$TMPFILE"
+NUC_EXIT="$?"
+set -e
 
-if [ ! -s "$TMPFILE" ]; then
-  log "INFO: No findings detected (empty output)"
+if [ "$NUC_EXIT" -ne 0 ] || [ ! -s "$TMPFILE" ]; then
+  log "Fallback nuclei produced no output or failed (exit $NUC_EXIT). Cleaning up and exiting."
   rm -f "$TMPFILE"
   exit 0
 fi
@@ -154,7 +120,7 @@ fi
 log "Retrying notify with -input on $TMPFILE"
 set +e
 notify -pc "$PROVIDER_PATH" -input "$TMPFILE"
-NOTIFY_EXIT=$?
+NOTIFY_EXIT="$?"
 set -e
 
 if [ "$NOTIFY_EXIT" -eq 0 ]; then
@@ -162,8 +128,6 @@ if [ "$NOTIFY_EXIT" -eq 0 ]; then
   rm -f "$TMPFILE"
   exit 0
 else
-  log "ERROR: Fallback notify failed with exit code $NOTIFY_EXIT"
-  log "Keeping $TMPFILE for investigation"
-  exit $NOTIFY_EXIT
+  log "Fallback notify failed (exit $NOTIFY_EXIT). Keeping $TMPFILE for investigation."
+  exit 0
 fi
-
