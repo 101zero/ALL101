@@ -1,34 +1,31 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# مسارات قابلة للّغيـر عن طريق env
 TARGETS_PATH="${TARGETS_PATH:-/data/5subdomains.txt}"
 PROVIDER_PATH="${PROVIDER_PATH:-/secrets/provider.yaml}"
 TEMPLATES_PATH="${TEMPLATES_PATH:-/nuclei-templates}"
-RESULTS_PATH="${RESULTS_PATH:-/data/results.json}"
 
 log(){ echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] $*"; }
 
-log "START - nuclei-notify run"
+log "START - nuclei-notify (pipe mode)"
 log "TARGETS=$TARGETS_PATH PROVIDER=$PROVIDER_PATH TEMPLATES=$TEMPLATES_PATH"
 
-# تحقق من وجود provider
+# checks
 if [ ! -f "$PROVIDER_PATH" ]; then
   log "ERROR provider file missing at $PROVIDER_PATH"
   exit 2
 fi
 
-# تحقق من targets
 if [ ! -f "$TARGETS_PATH" ]; then
   log "ERROR targets file missing at $TARGETS_PATH"
   exit 2
 fi
 
-# إذا ما فيه تمبليتس، نزّل النسخة الرسمية مؤقتًا
+# ensure templates exist; download official master if missing
 if [ ! -d "$TEMPLATES_PATH" ] || [ -z "$(ls -A "$TEMPLATES_PATH" 2>/dev/null || true)" ]; then
-  log "Downloading nuclei-templates to $TEMPLATES_PATH"
+  log "nuclei-templates not present, downloading..."
   TMPZIP="/tmp/nuclei-templates.zip"
-  wget -q -O "$TMPZIP" "https://github.com/projectdiscovery/nuclei-templates/archive/refs/heads/master.zip" || log "WARN: download templates failed"
+  wget -q -O "$TMPZIP" "https://github.com/projectdiscovery/nuclei-templates/archive/refs/heads/master.zip" || log "WARN: templates download failed"
   mkdir -p "$TEMPLATES_PATH"
   unzip -o "$TMPZIP" -d /tmp || true
   if [ -d /tmp/nuclei-templates-master ]; then
@@ -37,34 +34,45 @@ if [ ! -d "$TEMPLATES_PATH" ] || [ -z "$(ls -A "$TEMPLATES_PATH" 2>/dev/null || 
   rm -f "$TMPZIP"
 fi
 
-# safety: run on a sample first (OPTIONAL) - comment out for full run
-# head -n 500 "$TARGETS_PATH" > /tmp/sample_targets.txt && TARGETS_PATH="/tmp/sample_targets.txt"
+# --- PRIMARY: exact command requested (pipe, no JSON flag) ---
+log "Running: nuclei -l $TARGETS_PATH -t $TEMPLATES_PATH -s high,critical -silent | notify -pc $PROVIDER_PATH"
+set +e
+nuclei -l "$TARGETS_PATH" -t "$TEMPLATES_PATH" -s high,critical -silent | notify -pc "$PROVIDER_PATH"
+PIPE_EXIT="$?"
+set -e
 
-# تحكمات أداء آمنة (قابلة للتعديل عبر env)
-CONCURRENCY="${CONCURRENCY:-5}"
-RATE_LIMIT="${RATE_LIMIT:-50}"   # requests per second (تغيّره لو حابب أبطأ)
-TIMEOUT="${TIMEOUT:-8s}"
-RETRIES="${RETRIES:-0}"
-
-log "Running nuclei with c=$CONCURRENCY rl=$RATE_LIMIT timeout=$TIMEOUT"
-# نشغل nuclei ونكتب الناتج مؤقتًا كـ JSON (then notify)
-TMP_OUTPUT="/tmp/nuclei_out.json"
-nuclei -l "$TARGETS_PATH" -t "$TEMPLATES_PATH" -s high,critical -silent -c "$CONCURRENCY" -rl "$RATE_LIMIT" -timeout "$TIMEOUT" -retries "$RETRIES" -json -o "$TMP_OUTPUT" || log "nuclei completed (exit nonzero or no findings)"
-
-# لو الملف فاضي نتوقف بهدوء
-if [ ! -s "$TMP_OUTPUT" ]; then
-  log "No findings - nothing to notify"
-  echo "{}" > "$RESULTS_PATH"
+if [ "$PIPE_EXIT" -eq 0 ]; then
+  log "PIPE OK: nuclei output piped to notify successfully"
   exit 0
 fi
 
-# أرسل notifications عبر notify
-log "Sending notify..."
-# بعض نسخ notify تأخذ -input بدل stdin; نستخدم ملف ثابت للتماشي
-notify -pc "$PROVIDER_PATH" -input "$TMP_OUTPUT" || log "notify command failed"
+# --- FALLBACK (only if direct pipe fails) ---
+log "PIPE FAILED (exit $PIPE_EXIT). Falling back: capture nuclei output to temp file and retry notify with -input"
 
-# حفظ نسخة من النتائج
-cp "$TMP_OUTPUT" "$RESULTS_PATH" || true
-log "Saved results to $RESULTS_PATH"
-log "FINISH"
-exit 0
+TMPFILE="$(mktemp /tmp/nuclei_out_XXXX)"
+# produce plain text output (no -json): write to file then call notify -input
+set +e
+nuclei -l "$TARGETS_PATH" -t "$TEMPLATES_PATH" -s high,critical -silent -o "$TMPFILE"
+NUC_EXIT="$?"
+set -e
+
+if [ "$NUC_EXIT" -ne 0 ] || [ ! -s "$TMPFILE" ]; then
+  log "Fallback nuclei produced no output or failed (exit $NUC_EXIT). Cleaning up and exiting."
+  rm -f "$TMPFILE"
+  exit 0
+fi
+
+log "Retrying notify with -input on $TMPFILE"
+set +e
+notify -pc "$PROVIDER_PATH" -input "$TMPFILE"
+NOTIFY_EXIT="$?"
+set -e
+
+if [ "$NOTIFY_EXIT" -eq 0 ]; then
+  log "Fallback notify OK"
+  rm -f "$TMPFILE"
+  exit 0
+else
+  log "Fallback notify failed (exit $NOTIFY_EXIT). Keeping $TMPFILE for investigation."
+  exit 0
+fi
