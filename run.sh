@@ -21,17 +21,13 @@ if [ ! -f "$TARGETS_PATH" ]; then
   exit 2
 fi
 
-# ensure templates exist; download official master if missing
+# ✅ بدل ما نحمل ZIP، هنخلي nuclei نفسه يحدث التمبلتس
 if [ ! -d "$TEMPLATES_PATH" ] || [ -z "$(ls -A "$TEMPLATES_PATH" 2>/dev/null || true)" ]; then
-  log "nuclei-templates not present, downloading..."
-  TMPZIP="/tmp/nuclei-templates.zip"
-  wget -q -O "$TMPZIP" "https://github.com/projectdiscovery/nuclei-templates/archive/refs/heads/master.zip" || log "WARN: templates download failed"
+  log "Templates not found locally, running nuclei -ut ..."
   mkdir -p "$TEMPLATES_PATH"
-  unzip -o "$TMPZIP" -d /tmp || true
-  if [ -d /tmp/nuclei-templates-master ]; then
-    mv /tmp/nuclei-templates-master/* "$TEMPLATES_PATH"/ || true
-  fi
-  rm -f "$TMPZIP"
+  nuclei -ut >/dev/null 2>&1 || {
+    log "WARN: nuclei -ut failed, continuing anyway."
+  }
 fi
 
 # --- PRIMARY: exact command requested (pipe, no JSON flag) ---
