@@ -90,9 +90,9 @@ if [ ! -d "$TEMPLATES_PATH" ] || [ -z "$(ls -A "$TEMPLATES_PATH" 2>/dev/null || 
 fi
 
 # --- PRIMARY: exact command requested (pipe, no JSON flag) ---
-log "Running: nuclei -l $TARGETS_PATH -t $TEMPLATES_PATH -s high,critical -silent | notify -pc $PROVIDER_PATH"
+log "Running: nuclei -l $TARGETS_PATH -t $TEMPLATES_PATH -s high,critical -as -silent | notify -pc $PROVIDER_PATH"
 set +e
-nuclei -l "$TARGETS_PATH" -t "$TEMPLATES_PATH" -s high,critical -silent | notify -pc "$PROVIDER_PATH"
+nuclei -l "$TARGETS_PATH" -t "$TEMPLATES_PATH" -s high,critical -as -silent | notify -pc "$PROVIDER_PATH"
 PIPE_EXIT="$?"
 set -e
 
