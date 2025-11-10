@@ -1,0 +1,4 @@
+/secrets
+provider.yaml
+*.log
+/tmp
